@@ -1,17 +1,21 @@
 // app.js -- інтерфейс: камера / відео з галереї -> точки MediaPipe -> слова.
+// Два способи: "Запис речення" (записати й розпізнати) і "Наживо" (ковзне вікно 4 с щосекунди).
 
 import { Detector, drawSkeleton } from "./detector.js";
-import { resampleTo30fps } from "./features.js";
+import { resampleTo30fps, rowsToRaw, PersonAdapter } from "./features.js";
 import { Recognizer, MIN_FRAMES, MAX_FRAMES, summarize, serverBase, serverHealth, recognizeOnline } from "./recognizer.js";
 
 const $ = (id) => document.getElementById(id);
 const view = $("view"), vctx = view.getContext("2d"), video = $("video");
 const MAX_RECORD_S = 30;
+const LIVE_WINDOW_MS = 4000, LIVE_HOP_MS = 1000, LIVE_REPEAT_MS = 6000, LIVE_MAX_WORDS = 40;
 
 const state = {
-  detector: null, recognizer: null,
-  stream: null, facing: "user", looping: false,
+  detector: null, recognizer: null, adapter: null,
+  stream: null, cams: [], camId: null, facing: "user", looping: false,
+  kind: "clip",                       // clip | live
   recording: false, recStart: 0, samples: [],
+  live: null,                         // {samples, lastRun, lastAdded, emitted, words, running}
   busy: false, mode: "offline", history: [],
 };
 
@@ -34,8 +38,8 @@ function thresholds() {
 }
 
 function initSettings(cfg) {
-  const sure = store.get("sure", cfg.threshold_sure), maybe = store.get("maybe", cfg.threshold_maybe);
-  $("sureThr").value = sure; $("maybeThr").value = maybe;
+  $("sureThr").value = store.get("sure", cfg.threshold_sure);
+  $("maybeThr").value = store.get("maybe", cfg.threshold_maybe);
   const show = () => {
     let { sure, maybe } = thresholds();
     if (maybe > sure) { $("maybeThr").value = sure; maybe = sure; }
@@ -48,11 +52,32 @@ function initSettings(cfg) {
   $("serverUrl").value = store.get("server", "");
   $("serverUrl").addEventListener("change", () => { store.set("server", $("serverUrl").value.trim()); if (state.mode === "online") checkServer(); });
   state.history = store.get("history", []);
+  state.camId = store.get("camId", null);
   renderHistory();
 }
 
 // ---------------------------------------------------------------------------
-// Режим офлайн / онлайн
+// Підлаштування під людину
+// ---------------------------------------------------------------------------
+
+function renderCalib() {
+  const box = $("calib");
+  box.classList.toggle("hidden", !state.recognizer?.adapts);
+  if (!state.adapter) return;
+  const s = state.adapter.frames / 30;
+  const k = (state.recognizer?.cfg.adapt?.k ?? 300) / 30;
+  $("calibText").textContent = s < 1 ? "Підлаштування під людину: ще немає даних"
+    : `Підлаштування під людину: ${s.toFixed(0)} с жестів` + (s < k ? " (ще звикає)" : "");
+}
+
+$("btnNewPerson").addEventListener("click", () => {
+  state.adapter?.reset();
+  renderCalib();
+  setStatus("Статистику людини скинуто. Перші 10–20 с жестів модель знову звикатиме.");
+});
+
+// ---------------------------------------------------------------------------
+// Режим офлайн / онлайн і спосіб (запис / наживо)
 // ---------------------------------------------------------------------------
 
 async function checkServer() {
@@ -61,9 +86,9 @@ async function checkServer() {
   try {
     const h = await serverHealth(base);
     $("serverState").textContent = `Сервер на зв'язку: ${h.models} модел${h.models === 1 ? "ь" : "і"} в ансамблі` +
-      (h.llm ? `, речення складає ${h.llm}` : ", мовна модель недоступна (лише слова)");
+      (h.llm ? `, речення складає ${h.llm}` : ", без складання речень (лише слова)");
     return true;
-  } catch (e) {
+  } catch {
     $("serverState").textContent = "Сервер недоступний (" + base + "). Розпізнавання піде офлайн.";
     return false;
   }
@@ -79,30 +104,75 @@ function setMode(mode) {
   if (mode === "online") checkServer();
 }
 
+function setKind(kind) {
+  if (state.recording) stopRecording(false);
+  if (state.live) stopLive();
+  state.kind = kind;
+  store.set("kind", kind);
+  for (const [id, k] of [["kindClip", "clip"], ["kindLive", "live"]]) {
+    $(id).classList.toggle("on", k === kind);
+    $(id).setAttribute("aria-checked", String(k === kind));
+  }
+  $("btnRecord").textContent = kind === "live" ? "Почати наживо" : "Почати запис";
+  $("liveBox").classList.toggle("hidden", kind !== "live");
+}
+
 // ---------------------------------------------------------------------------
 // Камера
 // ---------------------------------------------------------------------------
 
+function camKind(track) {
+  const s = track.getSettings ? track.getSettings() : {};
+  const label = (track.label || "").toLowerCase();
+  if (s.facingMode === "user" || /front|user|перед|facetime/.test(label)) return "front";
+  if (s.facingMode === "environment" || /back|rear|environment|задн/.test(label)) return "back";
+  return "other";
+}
+
+async function openStream() {
+  const base = { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } };
+  const tries = [];
+  if (state.camId) tries.push({ ...base, deviceId: { exact: state.camId } });
+  tries.push({ ...base, facingMode: { exact: state.facing } });
+  tries.push({ ...base, facingMode: state.facing });
+  tries.push(true);
+  let lastErr;
+  for (const video of tries) {
+    try { return await navigator.mediaDevices.getUserMedia({ video, audio: false }); } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
 async function startCamera() {
   stopCamera();
   try {
-    state.stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: state.facing, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
-      audio: false,
-    });
+    state.stream = await openStream();
   } catch (e) {
     setStatus("Немає доступу до камери: " + e.message + ". Камера працює лише через https або localhost.", true);
     return;
   }
+  const track = state.stream.getVideoTracks()[0];
+  // Після дозволу браузер показує назви камер -- тепер можна скласти їх список.
+  try {
+    state.cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+  } catch { state.cams = []; }
+  state.camId = track.getSettings?.().deviceId || state.camId;
+  store.set("camId", state.camId);
+  const kind = camKind(track);
+  state.facing = kind === "back" ? "environment" : kind === "front" ? "user" : state.facing;
   video.srcObject = state.stream;
   await video.play();
-  view.classList.toggle("mirror", state.facing === "user"); // дзеркалимо лише показ, не дані
+  view.classList.toggle("mirror", kind === "front"); // дзеркалимо лише показ, не дані
+  const idx = state.cams.findIndex((c) => c.deviceId === state.camId);
+  const name = kind === "front" ? "фронтальна" : kind === "back" ? "задня" : "камера";
+  $("camInfo").textContent = `Камера: ${name}` + (state.cams.length > 1 ? ` (${idx + 1} з ${state.cams.length}) — ⟲ щоб змінити` : "");
+  $("camInfo").classList.remove("hidden");
   $("placeholder").classList.add("hidden");
   $("badges").classList.remove("hidden");
   $("btnCamera").textContent = "Вимкнути камеру";
   $("btnRecord").disabled = !state.detector || !state.recognizer;
   $("btnFlip").disabled = false;
-  setStatus("Камера увімкнена. Станьте так, щоб було видно тіло й обидві руки.");
+  setStatus("Камера увімкнена. Людину має бути видно від голови до пояса, обидві руки в кадрі.");
   state.looping = true;
   loop();
 }
@@ -110,12 +180,26 @@ async function startCamera() {
 function stopCamera() {
   state.looping = false;
   if (state.recording) stopRecording(false);
+  if (state.live) stopLive();
   if (state.stream) state.stream.getTracks().forEach((t) => t.stop());
   state.stream = null;
   video.srcObject = null;
   $("btnCamera").textContent = "Увімкнути камеру";
   $("btnRecord").disabled = true;
   $("btnFlip").disabled = true;
+}
+
+async function flipCamera() {
+  if (state.cams.length > 1) {
+    const i = state.cams.findIndex((c) => c.deviceId === state.camId);
+    state.camId = state.cams[(i + 1) % state.cams.length].deviceId;
+  } else {
+    // список камер недоступний -- перемикаємо за напрямком
+    state.camId = null;
+    state.facing = state.facing === "user" ? "environment" : "user";
+  }
+  store.set("camId", state.camId);
+  await startCamera();
 }
 
 function setBadges(row) {
@@ -134,13 +218,14 @@ async function loop() {
       vctx.drawImage(state.detector.canvas, 0, 0, view.width, view.height);
       drawSkeleton(vctx, view.width, det);
       setBadges(det.row);
+      const t = performance.now();
       if (state.recording) {
-        const t = performance.now();
         state.samples.push({ t, row: det.row });
         const s = (t - state.recStart) / 1000;
         $("recTime").textContent = s.toFixed(1) + " с";
         if (s >= MAX_RECORD_S) stopRecording(true);
       }
+      if (state.live) liveFrame(t, det.row);
     } catch (e) {
       console.error(e);
       setStatus("Помилка детекції: " + e.message, true);
@@ -149,6 +234,10 @@ async function loop() {
   }
   requestAnimationFrame(loop);
 }
+
+// ---------------------------------------------------------------------------
+// Запис речення
+// ---------------------------------------------------------------------------
 
 function startRecording() {
   state.samples = [];
@@ -171,6 +260,94 @@ function stopRecording(process = true) {
 }
 
 // ---------------------------------------------------------------------------
+// Наживо: кожну секунду розпізнаємо останні 4 с
+// ---------------------------------------------------------------------------
+
+function startLive() {
+  state.live = { samples: [], lastRun: performance.now(), lastAdded: null, emitted: new Map(), words: [], running: false };
+  $("rec").classList.remove("hidden");
+  $("btnRecord").textContent = "Зупинити";
+  $("btnRecord").classList.add("recording");
+  $("liveCaption").replaceChildren(emptySpan("слова з'являтимуться тут"));
+  $("liveNow").replaceChildren();
+  setStatus("Наживо: жестикулюйте, слова з'являтимуться під відео.");
+}
+
+function stopLive() {
+  const live = state.live;
+  state.live = null;
+  $("rec").classList.add("hidden");
+  $("btnRecord").textContent = state.kind === "live" ? "Почати наживо" : "Почати запис";
+  $("btnRecord").classList.remove("recording");
+  if (live && live.words.length) {
+    addHistory({ sure: live.words.map((w) => ({ word: w.word, p: w.p })), sentence: null }, "наживо");
+  }
+  setStatus("Зупинено.");
+}
+
+function liveFrame(t, row) {
+  const live = state.live;
+  live.samples.push({ t, row });
+  while (live.samples.length && live.samples[0].t < t - LIVE_WINDOW_MS - 500) live.samples.shift();
+  $("recTime").textContent = "наживо";
+  if (!live.running && t - live.lastRun >= LIVE_HOP_MS) {
+    live.lastRun = t;
+    live.running = true;
+    liveStep(t).catch((e) => console.error(e)).finally(() => { live.running = false; });
+  }
+}
+
+async function liveStep(now) {
+  const live = state.live;
+  if (!live) return;
+  const win = live.samples.filter((s) => s.t >= now - LIVE_WINDOW_MS);
+  const rows = resampleTo30fps(win);
+  if (rows.length < MIN_FRAMES) return;
+  const hands = rows.filter((r) => r[33 * 3 + 2] > 0 || r[54 * 3 + 2] > 0).length;
+  const raw = rowsToRaw(rows);
+  // до статистики людини -- лише кадри, яких ще не було в попередніх вікнах
+  const fresh = live.lastAdded === null ? raw.T : Math.min(raw.T, Math.round(((now - live.lastAdded) / 1000) * 30));
+  live.lastAdded = now;
+  if (hands < rows.length * 0.3) { // рук майже не видно -- людина не жестикулює, не вгадуємо
+    $("liveNow").replaceChildren(emptySpan("рук не видно"));
+    return;
+  }
+  state.adapter.add(raw, raw.T - fresh);
+  renderCalib();
+  const probs = await state.recognizer.predictRaw(raw, state.adapter);
+  if (!state.live) return;
+  const thr = thresholds();
+  const res = summarize(state.recognizer.cfg.vocab, probs, thr.sure, thr.maybe);
+  for (const x of res.sure) {
+    const last = live.emitted.get(x.word);
+    if (last === undefined || now - last > LIVE_REPEAT_MS) live.words.push({ word: x.word, p: x.p, t: now });
+    live.emitted.set(x.word, now);
+  }
+  live.words = live.words.slice(-LIVE_MAX_WORDS);
+  renderLive(live, res, now);
+}
+
+function emptySpan(text) {
+  const e = document.createElement("span"); e.className = "empty"; e.textContent = text; return e;
+}
+
+function renderLive(live, res, now) {
+  const cap = $("liveCaption");
+  cap.replaceChildren();
+  if (!live.words.length) cap.append(emptySpan("поки нічого впевненого"));
+  for (const w of live.words) {
+    const s = document.createElement("span");
+    s.className = "w " + (now - w.t < 2500 ? "new" : "old");
+    s.textContent = w.word;
+    cap.append(s, " "); // справжній пробіл: інакше слова зливаються і рядок не переноситься
+  }
+  const box = $("liveNow"); box.replaceChildren();
+  const cand = [...res.sure, ...res.maybe].slice(0, 4);
+  if (!cand.length) box.append(emptySpan("—"));
+  for (const x of cand) box.append(chip(x, res.sure.includes(x) ? "sure" : "maybe"));
+}
+
+// ---------------------------------------------------------------------------
 // Відео з галереї
 // ---------------------------------------------------------------------------
 
@@ -178,8 +355,7 @@ function once(el, ev) { return new Promise((res, rej) => { el.addEventListener(e
 
 async function processFile(file) {
   if (!state.detector || !state.recognizer) return;
-  const wasLooping = state.looping;
-  if (wasLooping) stopCamera();
+  if (state.looping) stopCamera();
   const fv = document.createElement("video");
   fv.muted = true; fv.playsInline = true; fv.preload = "auto";
   fv.src = URL.createObjectURL(file);
@@ -219,7 +395,7 @@ async function processFile(file) {
 }
 
 // ---------------------------------------------------------------------------
-// Розпізнавання
+// Розпізнавання запису
 // ---------------------------------------------------------------------------
 
 async function recognize(samples, source) {
@@ -227,12 +403,14 @@ async function recognize(samples, source) {
   if (rows.length < MIN_FRAMES) { setStatus("Запис закороткий — потрібно хоча б пів секунди.", true); return; }
   const handFrames = rows.filter((r) => r[33 * 3 + 2] > 0 || r[54 * 3 + 2] > 0).length;
   const thr = thresholds();
+  const raw = rowsToRaw(rows);
+  if (handFrames >= rows.length * 0.3) { state.adapter.add(raw); renderCalib(); } // поточний запис -- теж дані про людину
   let res, meta, note = "";
   const t0 = performance.now();
   if (state.mode === "online") {
     setStatus("Надсилаю точки на сервер…");
     try {
-      const r = await recognizeOnline(serverBase($("serverUrl").value), rows, thr);
+      const r = await recognizeOnline(serverBase($("serverUrl").value), rows, thr, state.adapter);
       res = { sure: r.sure, maybe: r.maybe, top: r.top, sentence: r.sentence, sentenceNote: r.sentence_note };
       meta = `онлайн · ансамбль ${r.models} · ${r.llm || "без мовної моделі"}`;
     } catch (e) {
@@ -242,12 +420,11 @@ async function recognize(samples, source) {
   }
   if (!res) {
     setStatus("Розпізнаю на телефоні…");
-    const probs = await state.recognizer.predict(rows);
+    const probs = await state.recognizer.predictRaw(raw, state.adapter);
     res = summarize(state.recognizer.cfg.vocab, probs, thr.sure, thr.maybe);
     meta = "офлайн · на телефоні";
   }
-  const secs = rows.length / 30;
-  meta += ` · ${secs.toFixed(1)} с · ${((performance.now() - t0) / 1000).toFixed(1)} с обробки`;
+  meta += ` · ${(rows.length / 30).toFixed(1)} с · ${((performance.now() - t0) / 1000).toFixed(1)} с обробки`;
   if (handFrames < rows.length * 0.3) note += "Руки було видно менш ніж на третині кадрів — результат ненадійний. ";
   render(res, meta, note);
   addHistory(res, source);
@@ -269,7 +446,7 @@ function render(res, meta, note) {
   $("resMeta").textContent = meta;
   const fill = (id, items, cls, emptyText) => {
     const box = $(id); box.replaceChildren();
-    if (!items.length) { const e = document.createElement("span"); e.className = "empty"; e.textContent = emptyText; box.append(e); }
+    if (!items.length) box.append(emptySpan(emptyText));
     for (const x of items) box.append(chip(x, cls));
   };
   fill("sure", res.sure, "sure", "немає впевнено розпізнаних слів");
@@ -317,11 +494,16 @@ function renderHistory() {
 // ---------------------------------------------------------------------------
 
 $("btnCamera").addEventListener("click", () => (state.stream ? stopCamera() : startCamera()));
-$("btnFlip").addEventListener("click", () => { state.facing = state.facing === "user" ? "environment" : "user"; startCamera(); });
-$("btnRecord").addEventListener("click", () => (state.recording ? stopRecording(true) : startRecording()));
+$("btnFlip").addEventListener("click", () => flipCamera());
+$("btnRecord").addEventListener("click", () => {
+  if (state.kind === "live") return state.live ? stopLive() : startLive();
+  return state.recording ? stopRecording(true) : startRecording();
+});
 $("fileInput").addEventListener("change", (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) processFile(f); });
 $("modeOffline").addEventListener("click", () => setMode("offline"));
 $("modeOnline").addEventListener("click", () => setMode("online"));
+$("kindClip").addEventListener("click", () => setKind("clip"));
+$("kindLive").addEventListener("click", () => setKind("live"));
 
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
   navigator.serviceWorker.register("sw.js").catch((e) => console.warn("Service worker:", e));
@@ -331,8 +513,11 @@ if ("serviceWorker" in navigator && (location.protocol === "https:" || location.
   try {
     const [rec, det] = await Promise.all([Recognizer.create(), Detector.create()]);
     state.recognizer = rec; state.detector = det;
+    state.adapter = new PersonAdapter(rec.cfg);
     initSettings(rec.cfg);
     setMode(store.get("mode", "offline"));
+    setKind(store.get("kind", "clip"));
+    renderCalib();
     $("buildInfo").textContent = `Модель: ${rec.cfg.model_desc}, ${rec.cfg.vocab.length} слів · детектор: ${det.delegate}`;
     setStatus("Готово. Увімкніть камеру або виберіть відео.");
     if (state.stream) $("btnRecord").disabled = false;

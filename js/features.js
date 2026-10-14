@@ -186,8 +186,11 @@ function handBlock(r, c0, sh0, flag, poseOk, feat, valid, off) {
   }
 }
 
-/** Статика (T x 174) -> нормалізовані ознаки моделі, Float32Array(T*243). */
-export function staticToModelInput(stat, cfg) {
+/**
+ * Статика (T x 174) -> ознаки моделі ДО нормалізації: { f: Float32Array(T*243), v: Uint8Array(T*243) }
+ * (v -- достовірність значення, як valid у sign_data.to_model_features).
+ */
+export function staticToRaw(stat) {
   const T = stat.length;
   const st = [], stv = [];
   for (let t = 0; t < T; t++) {
@@ -204,20 +207,85 @@ export function staticToModelInput(stat, cfg) {
     v[120] = v[121] = v[122] = true;
     st.push(f); stv.push(v);
   }
-  const out = new Float32Array(T * FEAT_DIM);
-  const { mean, std } = cfg;
+  const out = new Float32Array(T * FEAT_DIM), valid = new Uint8Array(T * FEAT_DIM);
   for (let t = 0; t < T; t++) {
     const o = t * FEAT_DIM;
-    for (let j = 0; j < STATIC2; j++) {
-      out[o + j] = stv[t][j] ? clip(Math.fround((st[t][j] - mean[j]) / std[j])) : 0;
-    }
+    for (let j = 0; j < STATIC2; j++) { out[o + j] = st[t][j]; valid[o + j] = stv[t][j] ? 1 : 0; }
     for (let j = 0; j < MOTION2; j++) {
       const ok = t > 0 && stv[t][j] && stv[t - 1][j];
-      const k = STATIC2 + j;
-      out[o + k] = ok ? clip(Math.fround((Math.fround(st[t][j] - st[t - 1][j]) - mean[k]) / std[k])) : 0;
+      out[o + STATIC2 + j] = ok ? Math.fround(st[t][j] - st[t - 1][j]) : 0;
+      valid[o + STATIC2 + j] = ok ? 1 : 0;
     }
   }
+  return { f: out, v: valid, T };
+}
+
+/** Нормалізація (sign_data.normalize_features): (x - mean) / std, невідомі значення -> 0, обрізання +-10. */
+export function normalizeRaw(raw, mean, std) {
+  const out = new Float32Array(raw.f.length);
+  for (let i = 0; i < out.length; i++) {
+    const j = i % FEAT_DIM;
+    out[i] = raw.v[i] ? clip(Math.fround((raw.f[i] - mean[j]) / std[j])) : 0;
+  }
   return out;
+}
+
+/** Статика (T x 174) -> нормалізовані ознаки моделі, Float32Array(T*243). */
+export function staticToModelInput(stat, cfg) {
+  return normalizeRaw(staticToRaw(stat), cfg.mean, cfg.std);
+}
+
+/** Кадри 225 -> ознаки до нормалізації (з заповненням коротких пропусків рук). */
+export function rowsToRaw(rows) {
+  return staticToRaw(fillHandGaps(rows.map(rowToStatic)));
+}
+
+/**
+ * Підлаштування під людину (sign_data.adapted_stats): накопичує статистику ознак
+ * кадрів поточного сеансу і дає середнє/std, "підтягнуті" до загальних (k кадрів).
+ */
+export class PersonAdapter {
+  constructor(cfg) {
+    this.cfg = cfg;
+    this.reset();
+  }
+  reset() {
+    this.n = new Float64Array(FEAT_DIM);
+    this.s = new Float64Array(FEAT_DIM);
+    this.ss = new Float64Array(FEAT_DIM);
+    this.frames = 0;
+  }
+  /** Додати кадри raw (лише з кадру from, щоб у режимі наживо не рахувати кадр двічі). */
+  add(raw, from = 0) {
+    for (let t = from; t < raw.T; t++) {
+      const o = t * FEAT_DIM;
+      for (let j = 0; j < FEAT_DIM; j++) {
+        if (!raw.v[o + j]) continue;
+        const x = raw.f[o + j];
+        this.n[j] += 1; this.s[j] += x; this.ss[j] += x * x;
+      }
+    }
+    this.frames += Math.max(0, raw.T - from);
+  }
+  stats() {
+    const { mean: mg, std: sg, live } = this.cfg;
+    const k = this.cfg.adapt?.k ?? 300, floor = this.cfg.adapt?.floor ?? 0.25;
+    const mean = new Float32Array(FEAT_DIM), std = new Float32Array(FEAT_DIM);
+    for (let j = 0; j < FEAT_DIM; j++) {
+      if (!live[j]) { mean[j] = 0; std[j] = 1; continue; }
+      const m = (this.s[j] + k * mg[j]) / (this.n[j] + k);
+      const v = (this.ss[j] + k * (sg[j] * sg[j] + mg[j] * mg[j])) / (this.n[j] + k) - m * m;
+      mean[j] = m;
+      std[j] = Math.max(Math.sqrt(Math.max(v, 0)), floor * sg[j]);
+    }
+    return { mean, std };
+  }
+  /** Суми для сервера (той рахує статистику сам, з k своєї моделі). */
+  sums() {
+    const out = new Float64Array(3 * FEAT_DIM);
+    out.set(this.n, 0); out.set(this.s, FEAT_DIM); out.set(this.ss, 2 * FEAT_DIM);
+    return out;
+  }
 }
 
 function clip(x) { return x > 10 ? 10 : x < -10 ? -10 : x; }

@@ -42,16 +42,35 @@
         <div id="progress" class="progress hidden"><div id="progressBar"></div></div>
       </div>
 
+      <div class="seg" role="radiogroup" aria-label="Як розпізнавати">
+        <button id="kindClip" role="radio" aria-checked="true" class="on">Запис речення</button>
+        <button id="kindLive" role="radio" aria-checked="false">Наживо</button>
+      </div>
       <div class="controls">
         <button id="btnCamera" class="secondary">Увімкнути камеру</button>
         <button id="btnRecord" class="primary" disabled>Почати запис</button>
         <button id="btnFlip" class="secondary icon" title="Інша камера" aria-label="Інша камера" disabled>⟲</button>
       </div>
+      <p id="camInfo" class="note cam hidden"></p>
       <label class="file">
         <input id="fileInput" type="file" accept="video/*">
         <span>Розпізнати відео з галереї</span>
       </label>
+      <div id="calib" class="calib hidden">
+        <span id="calibText">Підлаштування під людину: ще немає даних</span>
+        <button id="btnNewPerson" class="link">Нова людина</button>
+      </div>
       <p id="status" class="status">Завантаження моделей…</p>
+    </section>
+
+    <section id="liveBox" class="card live hidden" aria-live="polite">
+      <div class="card-head">
+        <h2>Наживо</h2>
+        <span id="liveMeta" class="meta">вікно 4 с, оновлення щосекунди · на телефоні</span>
+      </div>
+      <p id="liveCaption" class="caption"><span class="empty">слова з'являтимуться тут</span></p>
+      <p class="label">Зараз, можливо</p>
+      <div id="liveNow" class="chips"></div>
     </section>
 
     <section id="result" class="card hidden" aria-live="polite">
@@ -98,7 +117,10 @@
       <summary>Як користуватися</summary>
       <ul>
         <li>Людина, що жестикулює, має бути видна від голови до пояса, обличчям до камери, при доброму світлі.</li>
-        <li>Запишіть одне речення (2–10 с). Позначки «Тіло» і «рука» зверху мають світитися.</li>
+        <li><b>Запис речення</b>: запишіть одне речення (2–10 с). Позначки «Тіло» і «рука» зверху мають світитися.</li>
+        <li><b>Наживо</b>: слова з'являються під відео по ходу жестикуляції (останні 4 с, оновлення щосекунди). Працює завжди на телефоні.</li>
+        <li><b>⟲</b> перемикає камери: фронтальну, задню (і інші, якщо є).</li>
+        <li>Якщо модель підлаштовується під людину, перші 10–20 с жестів вона «звикає» до мовця. Для іншої людини натисніть «Нова людина».</li>
         <li><b>Офлайн</b>: усе рахується на телефоні, інтернет не потрібен. <b>Онлайн</b>: на сервер ідуть лише координати точок (не відео); там працює ансамбль моделей і складається речення.</li>
         <li>Модель розпізнає ключові слова (408 слів, переважно з новин), а не повний переклад. Це дослідницький прототип: на нових людях він помиляється часто.</li>
       </ul>
