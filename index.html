@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Жести в текст</title>
+  <meta name="description" content="Розпізнавання ключових слів української жестової мови з камери телефона">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <img src="icons/icon-192.png" alt="" width="28" height="28">
+      <div>
+        <h1>Жести в текст</h1>
+        <p class="sub">Українська жестова мова · прототип</p>
+      </div>
+    </div>
+    <div class="mode" role="radiogroup" aria-label="Режим">
+      <button id="modeOffline" role="radio" aria-checked="true" class="on">Офлайн</button>
+      <button id="modeOnline" role="radio" aria-checked="false">Онлайн</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="stage">
+      <div class="view">
+        <canvas id="view" width="512" height="512" aria-label="Камера з накладеним скелетом"></canvas>
+        <div id="placeholder" class="placeholder">
+          <p>Увімкніть камеру або виберіть відео</p>
+        </div>
+        <div id="badges" class="badges hidden">
+          <span id="bBody" class="badge">Тіло</span>
+          <span id="bLeft" class="badge">Ліва рука</span>
+          <span id="bRight" class="badge">Права рука</span>
+        </div>
+        <div id="rec" class="rec hidden"><span class="dot"></span><span id="recTime">0.0 с</span></div>
+        <div id="progress" class="progress hidden"><div id="progressBar"></div></div>
+      </div>
+
+      <div class="controls">
+        <button id="btnCamera" class="secondary">Увімкнути камеру</button>
+        <button id="btnRecord" class="primary" disabled>Почати запис</button>
+        <button id="btnFlip" class="secondary icon" title="Інша камера" aria-label="Інша камера" disabled>⟲</button>
+      </div>
+      <label class="file">
+        <input id="fileInput" type="file" accept="video/*">
+        <span>Розпізнати відео з галереї</span>
+      </label>
+      <p id="status" class="status">Завантаження моделей…</p>
+    </section>
+
+    <section id="result" class="card hidden" aria-live="polite">
+      <div class="card-head">
+        <h2>Результат</h2>
+        <span id="resMeta" class="meta"></span>
+      </div>
+      <div id="sentenceBox" class="sentence hidden">
+        <p class="label">Речення (складене з упевнених слів)</p>
+        <p id="sentence"></p>
+      </div>
+      <p class="label">Упевнено</p>
+      <div id="sure" class="chips"></div>
+      <p class="label">Можливо</p>
+      <div id="maybe" class="chips"></div>
+      <p id="resNote" class="note"></p>
+      <details>
+        <summary>Деталі: 10 найімовірніших слів</summary>
+        <ol id="top" class="bars"></ol>
+      </details>
+    </section>
+
+    <section id="historyBox" class="card hidden">
+      <h2>Попередні</h2>
+      <ul id="history" class="history"></ul>
+    </section>
+
+    <details class="card settings">
+      <summary>Налаштування</summary>
+      <label>Адреса сервера (онлайн-режим)
+        <input id="serverUrl" type="url" placeholder="порожньо = той самий, звідки відкрито застосунок" autocomplete="off">
+      </label>
+      <p id="serverState" class="note"></p>
+      <label>Поріг «упевнено»: <b id="sureVal"></b>
+        <input id="sureThr" type="range" min="0.5" max="0.99" step="0.01">
+      </label>
+      <label>Поріг «можливо»: <b id="maybeVal"></b>
+        <input id="maybeThr" type="range" min="0.3" max="0.95" step="0.01">
+      </label>
+      <p class="note">Вищий поріг — менше слів, але частіше правильних.</p>
+    </details>
+
+    <details class="card about">
+      <summary>Як користуватися</summary>
+      <ul>
+        <li>Людина, що жестикулює, має бути видна від голови до пояса, обличчям до камери, при доброму світлі.</li>
+        <li>Запишіть одне речення (2–10 с). Позначки «Тіло» і «рука» зверху мають світитися.</li>
+        <li><b>Офлайн</b>: усе рахується на телефоні, інтернет не потрібен. <b>Онлайн</b>: на сервер ідуть лише координати точок (не відео); там працює ансамбль моделей і складається речення.</li>
+        <li>Модель розпізнає ключові слова (408 слів, переважно з новин), а не повний переклад. Це дослідницький прототип: на нових людях він помиляється часто.</li>
+      </ul>
+      <p id="buildInfo" class="note"></p>
+    </details>
+  </main>
+
+  <video id="video" playsinline muted class="hidden"></video>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
