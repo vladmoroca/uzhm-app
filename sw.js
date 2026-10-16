@@ -1,6 +1,6 @@
 // Service worker: кешує весь застосунок і моделі, щоб він працював без інтернету.
 // Файл sw.js генерує build.py із sw.template.js -- редагуйте шаблон.
-const VERSION = "724c81926b2c";
+const VERSION = "4225310fe6b7";
 const CACHE = "uzhm-" + VERSION;
 const ASSETS = [
   "./",
@@ -17,6 +17,7 @@ const ASSETS = [
   "./model/hand_landmarker.task",
   "./model/keywords.onnx",
   "./model/pose_landmarker_full.task",
+  "./README.md",
   "./vendor/mediapipe/vision_bundle.mjs",
   "./vendor/mediapipe/wasm/vision_wasm_internal.js",
   "./vendor/mediapipe/wasm/vision_wasm_internal.wasm",
