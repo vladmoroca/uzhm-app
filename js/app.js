@@ -378,21 +378,55 @@ function renderLive(live, res, now) {
 
 function once(el, ev) { return new Promise((res, rej) => { el.addEventListener(ev, res, { once: true }); el.addEventListener("error", rej, { once: true }); }); }
 
+/** Пройти відео, ВІДТВОРЮЮЧИ його, і детектувати кадри, щойно браузер їх показує
+ *  (requestVideoFrameCallback). Раніше ми перескакували до кожного кадру (currentTime), але на
+ *  телефоні кожен такий перехід декодує відео від найближчого ключового кадру -- це в рази довше.
+ *  Швидкість відтворення підлаштовується під швидкість детекції, щоб не пропускати кадри;
+ *  час кожного кадру береться з відео (mediaTime), тож пропуски згладить resampleTo30fps. */
+function scanByPlaying(fv, dur, samples, show) {
+  return new Promise((resolve, reject) => {
+    let detMs = 40, done = false;
+    const finish = () => { if (!done) { done = true; fv.pause(); resolve(); } };
+    const onFrame = async (_now, meta) => {
+      if (done) return;
+      const t = meta.mediaTime;
+      if (t > dur) return finish();
+      const s0 = performance.now();
+      try {
+        const det = await state.detector.detect(fv, fv.videoWidth, fv.videoHeight);
+        samples.push({ t: t * 1000, row: det.row });
+        show(det, t);
+      } catch (e) { done = true; return reject(e); }
+      detMs = 0.8 * detMs + 0.2 * (performance.now() - s0);
+      // ~1 кадр відео на одну детекцію (не швидше за звичайну швидкість і не повільніше за 1/10)
+      fv.playbackRate = Math.max(0.1, Math.min(1, 0.9 * 1000 / 30 / Math.max(detMs, 1)));
+      fv.requestVideoFrameCallback(onFrame);
+    };
+    fv.addEventListener("ended", finish, { once: true });
+    fv.requestVideoFrameCallback(onFrame);
+    fv.currentTime = 0;
+    fv.play().catch(reject);
+  });
+}
+
 async function processFile(file) {
   if (!state.detector || !state.recognizer) return;
   if (state.looping) stopCamera();
   const fv = document.createElement("video");
   fv.muted = true; fv.playsInline = true; fv.preload = "auto";
+  fv.style.cssText = "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none";
+  document.body.appendChild(fv);
   fv.src = URL.createObjectURL(file);
   try {
     await once(fv, "loadeddata");
   } catch {
     setStatus("Не вдалося відкрити відео (формат не підтримується браузером).", true);
+    fv.remove();
     return;
   }
   const dur = Math.min(fv.duration || 0, MAX_FRAMES / 30);
   const n = Math.floor(dur * 30);
-  if (n < MIN_FRAMES) { setStatus("Відео закоротке.", true); return; }
+  if (n < MIN_FRAMES) { setStatus("Відео закоротке.", true); fv.remove(); return; }
   view.classList.remove("mirror");
   $("placeholder").classList.add("hidden");
   $("badges").classList.remove("hidden");
@@ -400,22 +434,34 @@ async function processFile(file) {
   setStatus(`Обробка відео: ${n} кадрів…`);
   const samples = [];
   state.busy = true;
+  const t0 = performance.now();
+  const show = (det, t) => {
+    vctx.drawImage(state.detector.canvas, 0, 0, view.width, view.height);
+    drawSkeleton(vctx, view.width, det);
+    setBadges(det.row);
+    $("progressBar").style.width = Math.min(100, (100 * t) / dur).toFixed(1) + "%";
+  };
   try {
-    for (let i = 0; i < n; i++) {
-      fv.currentTime = Math.min(i / 30 + 1 / 60, fv.duration);
-      await once(fv, "seeked");
-      const det = await state.detector.detect(fv, fv.videoWidth, fv.videoHeight);
-      vctx.drawImage(state.detector.canvas, 0, 0, view.width, view.height);
-      drawSkeleton(vctx, view.width, det);
-      setBadges(det.row);
-      samples.push({ t: (i * 1000) / 30, row: det.row });
-      $("progressBar").style.width = ((100 * (i + 1)) / n).toFixed(1) + "%";
+    if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+      await scanByPlaying(fv, dur, samples, show);
+    } else {
+      // запасний шлях (старі браузери): перехід до кожного кадру -- повільно на телефонах
+      for (let i = 0; i < n; i++) {
+        fv.currentTime = Math.min(i / 30 + 1 / 60, fv.duration);
+        await once(fv, "seeked");
+        const det = await state.detector.detect(fv, fv.videoWidth, fv.videoHeight);
+        samples.push({ t: (i * 1000) / 30, row: det.row });
+        show(det, i / 30);
+      }
     }
   } finally {
     state.busy = false;
     $("progress").classList.add("hidden");
+    fv.pause();
+    fv.remove();
     URL.revokeObjectURL(fv.src);
   }
+  console.log(`відео ${dur.toFixed(1)} с: ${samples.length} кадрів оброблено за ${((performance.now() - t0) / 1000).toFixed(1)} с`);
   await recognize(samples, "відео: " + file.name);
 }
 
