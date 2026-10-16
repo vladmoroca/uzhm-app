@@ -84,8 +84,29 @@ export function serverBase(setting) {
 // цей заголовок її прибирає (іншим тунелям і самому серверу він не заважає).
 const NGROK = { "ngrok-skip-browser-warning": "1" };
 
-export async function serverHealth(base, timeoutMs = 4000) {
-  const r = await fetch(base + "/api/health", { headers: NGROK, signal: AbortSignal.timeout(timeoutMs) });
+/** Запит до сервера двома способами.
+ *  1) "простий" запит (без власних заголовків, тіло text/plain): браузер не робить попередньої
+ *     CORS-перевірки (OPTIONS), яку тунель може перехопити своєю сторінкою;
+ *  2) якщо у відповідь прийшло не JSON (сторінка-попередження ngrok) або запит не пройшов --
+ *     той самий запит із заголовком, що вимикає сторінку-попередження. */
+async function apiFetch(url, opts) {
+  let firstErr = null;
+  try {
+    const r = await fetch(url, opts);
+    if ((r.headers.get("content-type") || "").includes("application/json")) return r;
+    firstErr = new Error("сервер повернув не JSON (" + r.status + ")");
+  } catch (e) {
+    firstErr = e;
+  }
+  try {
+    return await fetch(url, { ...opts, headers: { ...(opts.headers || {}), ...NGROK } });
+  } catch (e) {
+    throw new Error(`${firstErr?.message || e.message}; з заголовком ngrok: ${e.message}`);
+  }
+}
+
+export async function serverHealth(base, timeoutMs = 6000) {
+  const r = await apiFetch(base + "/api/health", { signal: AbortSignal.timeout(timeoutMs) });
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
@@ -95,9 +116,9 @@ export async function recognizeOnline(base, rows, thresholds, adapter = null, ti
   const body = { rows_b64: rowsToBase64(rows), n: rows.length, dim: rows[0].length, fps: 30, ...thresholds };
   // статистика людини за сеанс (суми n, s, ss) -- сервер сам застосує її, якщо його модель з підлаштуванням
   if (adapter && adapter.frames > 0) body.adapt_sums_b64 = toBase64(adapter.sums());
-  const r = await fetch(base + "/api/recognize", {
+  const r = await apiFetch(base + "/api/recognize", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...NGROK },
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },  // JSON, але як text/plain -- без CORS-перевірки
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });

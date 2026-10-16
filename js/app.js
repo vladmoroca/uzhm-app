@@ -89,14 +89,16 @@ $("btnNewPerson").addEventListener("click", () => {
 
 async function checkServer() {
   const base = serverBase($("serverUrl").value);
-  $("serverState").textContent = "Перевіряю сервер " + base + " …";
+  const msg = (t, err = false) => { $("serverState").textContent = t; if (state.mode === "online") setStatus(t, err); };
+  msg("Перевіряю сервер " + base + " …");
   try {
     const h = await serverHealth(base);
-    $("serverState").textContent = `Сервер на зв'язку: ${h.models} модел${h.models === 1 ? "ь" : "і"} в ансамблі` +
-      (h.llm ? `, речення складає ${h.llm}` : ", без складання речень (лише слова)");
+    msg(`Онлайн: сервер на зв'язку (${h.models} модел${h.models === 1 ? "ь" : "і"} в ансамблі` +
+      (h.llm ? `, речення складає ${h.llm})` : ", без складання речень)"));
     return true;
-  } catch {
-    $("serverState").textContent = "Сервер недоступний (" + base + "). Розпізнавання піде офлайн.";
+  } catch (e) {
+    msg(`Сервер ${base} недоступний (${e.message}). Перевірте, що на ПК запущено start.bat, і адресу ` +
+      "в Налаштуваннях. Поки що розпізнавання піде офлайн.", true);
     return false;
   }
 }
@@ -529,7 +531,15 @@ $("kindClip").addEventListener("click", () => setKind("clip"));
 $("kindLive").addEventListener("click", () => setKind("live"));
 
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+  const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.register("sw.js").catch((e) => console.warn("Service worker:", e));
+  // з'явилась нова версія (новий sw.js) -- перезавантажити один раз, щоб працював новий код
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController && !sessionStorage.getItem("uzhm.reloaded")) {
+      sessionStorage.setItem("uzhm.reloaded", "1");
+      location.reload();
+    }
+  });
 }
 
 (async () => {
