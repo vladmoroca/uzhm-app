@@ -1,6 +1,6 @@
 // Service worker: кешує весь застосунок і моделі, щоб він працював без інтернету.
 // Файл sw.js генерує build.py із sw.template.js -- редагуйте шаблон.
-const VERSION = "4225310fe6b7";
+const VERSION = "27cea5474ad6";
 const CACHE = "uzhm-" + VERSION;
 const ASSETS = [
   "./",

@@ -49,10 +49,17 @@ function initSettings(cfg) {
   $("sureThr").addEventListener("input", show);
   $("maybeThr").addEventListener("input", show);
   show();
+  // QR-код від start.bat веде на застосунок з ?server=<адреса тунелю>: запам'ятовуємо її і прибираємо з адреси
+  const fromLink = new URLSearchParams(location.search).get("server");
+  if (fromLink) {
+    store.set("server", fromLink.trim());
+    store.set("mode", "online");  // прийшли за посиланням сервера -- одразу онлайн
+    history.replaceState(null, "", location.pathname);
+  }
   $("serverUrl").value = store.get("server", "");
   $("serverUrl").addEventListener("change", () => { store.set("server", $("serverUrl").value.trim()); if (state.mode === "online") checkServer(); });
   state.history = store.get("history", []);
-  state.camId = store.get("camId", null);
+  state.facing = store.get("facing", "user");
   renderHistory();
 }
 
@@ -129,43 +136,58 @@ function camKind(track) {
   return "other";
 }
 
-async function openStream() {
-  const base = { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } };
-  const tries = [];
-  if (state.camId) tries.push({ ...base, deviceId: { exact: state.camId } });
-  tries.push({ ...base, facingMode: { exact: state.facing } });
-  tries.push({ ...base, facingMode: state.facing });
-  tries.push(true);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const CAM_BASE = { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } };
+
+/** Спробувати відкрити камеру за списком обмежень. Android часто ще не встиг звільнити
+ *  попередню камеру (NotReadableError / AbortError) -- тоді чекаємо і пробуємо ще раз. */
+async function tryOpen(list) {
   let lastErr;
-  for (const video of tries) {
-    try { return await navigator.mediaDevices.getUserMedia({ video, audio: false }); } catch (e) { lastErr = e; }
+  for (const video of list) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      } catch (e) {
+        lastErr = e;
+        if (e.name !== "NotReadableError" && e.name !== "AbortError" && e.name !== "TrackStartError") break;
+        await sleep(400);
+      }
+    }
   }
   throw lastErr;
 }
 
-async function startCamera() {
+/** Камера за напрямком: спершу точний напрямок, потім камери з відповідною назвою, потім будь-яка. */
+function constraintsFor(facing) {
+  const want = facing === "environment" ? /back|rear|environment|задн/ : /front|user|перед|facetime/;
+  const list = [{ ...CAM_BASE, facingMode: { exact: facing } }];
+  for (const c of state.cams) if (c.deviceId && want.test((c.label || "").toLowerCase())) list.push({ ...CAM_BASE, deviceId: { exact: c.deviceId } });
+  list.push({ ...CAM_BASE, facingMode: facing });
+  return list;
+}
+
+async function startCamera(list = null) {
   stopCamera();
   try {
-    state.stream = await openStream();
+    state.stream = await tryOpen(list || [...constraintsFor(state.facing), true]);
   } catch (e) {
     setStatus("Немає доступу до камери: " + e.message + ". Камера працює лише через https або localhost.", true);
-    return;
+    return false;
   }
   const track = state.stream.getVideoTracks()[0];
   // Після дозволу браузер показує назви камер -- тепер можна скласти їх список.
   try {
     state.cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
   } catch { state.cams = []; }
-  state.camId = track.getSettings?.().deviceId || state.camId;
-  store.set("camId", state.camId);
+  state.camId = track.getSettings?.().deviceId || null;
   const kind = camKind(track);
   state.facing = kind === "back" ? "environment" : kind === "front" ? "user" : state.facing;
+  store.set("facing", state.facing);
   video.srcObject = state.stream;
   await video.play();
   view.classList.toggle("mirror", kind === "front"); // дзеркалимо лише показ, не дані
-  const idx = state.cams.findIndex((c) => c.deviceId === state.camId);
   const name = kind === "front" ? "фронтальна" : kind === "back" ? "задня" : "камера";
-  $("camInfo").textContent = `Камера: ${name}` + (state.cams.length > 1 ? ` (${idx + 1} з ${state.cams.length}) — ⟲ щоб змінити` : "");
+  $("camInfo").textContent = `Камера: ${name}` + (state.cams.length > 1 ? " — ⟲ щоб змінити" : "");
   $("camInfo").classList.remove("hidden");
   $("placeholder").classList.add("hidden");
   $("badges").classList.remove("hidden");
@@ -175,6 +197,7 @@ async function startCamera() {
   setStatus("Камера увімкнена. Людину має бути видно від голови до пояса, обидві руки в кадрі.");
   state.looping = true;
   loop();
+  return true;
 }
 
 function stopCamera() {
@@ -189,17 +212,17 @@ function stopCamera() {
   $("btnFlip").disabled = true;
 }
 
+/** ⟲ -- фронтальна <-> задня. Якщо в цьому напрямку камеру не відкрити, -- будь-яка інша, ніж зараз. */
 async function flipCamera() {
-  if (state.cams.length > 1) {
-    const i = state.cams.findIndex((c) => c.deviceId === state.camId);
-    state.camId = state.cams[(i + 1) % state.cams.length].deviceId;
-  } else {
-    // список камер недоступний -- перемикаємо за напрямком
-    state.camId = null;
-    state.facing = state.facing === "user" ? "environment" : "user";
-  }
-  store.set("camId", state.camId);
-  await startCamera();
+  const was = state.camId;
+  const want = state.facing === "user" ? "environment" : "user";
+  $("btnFlip").disabled = true;
+  stopCamera();
+  await sleep(300); // дати телефону звільнити поточну камеру
+  const others = state.cams.filter((c) => c.deviceId && c.deviceId !== was)
+    .map((c) => ({ ...CAM_BASE, deviceId: { exact: c.deviceId } }));
+  const ok = await startCamera([...constraintsFor(want), ...others, ...constraintsFor(state.facing)]);
+  if (ok && state.camId && state.camId === was) setStatus("Іншу камеру відкрити не вдалося -- працює та сама.", true);
 }
 
 function setBadges(row) {

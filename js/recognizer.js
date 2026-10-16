@@ -80,8 +80,12 @@ export function serverBase(setting) {
   return s || new URL(".", location.href).href.replace(/\/+$/, "");
 }
 
+// Безкоштовний ngrok показує браузерам сторінку-попередження замість відповіді сервера;
+// цей заголовок її прибирає (іншим тунелям і самому серверу він не заважає).
+const NGROK = { "ngrok-skip-browser-warning": "1" };
+
 export async function serverHealth(base, timeoutMs = 4000) {
-  const r = await fetch(base + "/api/health", { signal: AbortSignal.timeout(timeoutMs) });
+  const r = await fetch(base + "/api/health", { headers: NGROK, signal: AbortSignal.timeout(timeoutMs) });
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
@@ -93,7 +97,7 @@ export async function recognizeOnline(base, rows, thresholds, adapter = null, ti
   if (adapter && adapter.frames > 0) body.adapt_sums_b64 = toBase64(adapter.sums());
   const r = await fetch(base + "/api/recognize", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...NGROK },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
